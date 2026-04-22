@@ -45,7 +45,7 @@ int driveOffset = 350;
 //  RAMP CONFIGURATION
 // ============================================================
 const int RAMP_STEP     = 10;
-const int RAMP_INTERVAL = 15;
+const int RAMP_INTERVAL = 25;
 
 // ============================================================
 //  DRIVE STATE MACHINE
@@ -105,7 +105,7 @@ WebServer server(80);
 //  1. Copy one of the route arrays below and rename it
 //  2. Edit its steps
 //  3. Add a matching PATH_LEN_* constant
-//  4. Add a button in the HTML sound board panel (search for
+//  4. Add a button in the route panel (search for
 //     "ROUTE BUTTONS" in the HTML below)
 //  5. Add one else-if line in handleCmd() (search for
 //     "ROUTE COMMANDS" near the bottom of this file)
@@ -134,11 +134,10 @@ struct PathStep {
 };
 
 // ── Route 1: Square ──────────────────────────────────────────
-//  Drives in an approximate square: forward, turn, repeat x4
 const PathStep ROUTE_SQUARE[] = {
   { ACT_FORWARD,    2000, 300 },
   { ACT_STOP,        300,   0 },
-  { ACT_SPIN_RIGHT,  550, 350 },   // ~90° right turn
+  { ACT_SPIN_RIGHT,  550, 350 },
   { ACT_STOP,        300,   0 },
   { ACT_FORWARD,    2000, 300 },
   { ACT_STOP,        300,   0 },
@@ -156,7 +155,6 @@ const PathStep ROUTE_SQUARE[] = {
 const int PATH_LEN_SQUARE = sizeof(ROUTE_SQUARE) / sizeof(ROUTE_SQUARE[0]);
 
 // ── Route 2: Figure-8 ────────────────────────────────────────
-//  Two loops in opposing spin directions
 const PathStep ROUTE_FIGURE8[] = {
   { ACT_FORWARD,   1500, 300 },
   { ACT_STOP,       300,   0 },
@@ -172,11 +170,11 @@ const PathStep ROUTE_FIGURE8[] = {
   { ACT_STOP,       200,   0 },
   { ACT_FORWARD,   1500, 300 },
   { ACT_STOP,       300,   0 },
-  { ACT_SPIN_RIGHT, 550, 350 },   // complete first loop
+  { ACT_SPIN_RIGHT, 550, 350 },
   { ACT_STOP,       400,   0 },
   { ACT_FORWARD,   1500, 300 },
   { ACT_STOP,       300,   0 },
-  { ACT_SPIN_LEFT,  550, 350 },   // second loop opposite direction
+  { ACT_SPIN_LEFT,  550, 350 },
   { ACT_STOP,       200,   0 },
   { ACT_FORWARD,   1500, 300 },
   { ACT_STOP,       300,   0 },
@@ -194,7 +192,6 @@ const PathStep ROUTE_FIGURE8[] = {
 const int PATH_LEN_FIGURE8 = sizeof(ROUTE_FIGURE8) / sizeof(ROUTE_FIGURE8[0]);
 
 // ── Route 3: Patrol ───────────────────────────────────────────
-//  Forward, reverse, repeat – simple back-and-forth run
 const PathStep ROUTE_PATROL[] = {
   { ACT_FORWARD,  3000, 280 },
   { ACT_STOP,      500,   0 },
@@ -218,15 +215,34 @@ const int PATH_LEN_PATROL = sizeof(ROUTE_PATROL) / sizeof(ROUTE_PATROL[0]);
 // const int PATH_LEN_MYPATH = sizeof(ROUTE_MYPATH) / sizeof(ROUTE_MYPATH[0]);
 
 // ── Path runner state ─────────────────────────────────────────
-bool           pathRunning    = false;
+bool            pathRunning   = false;
 const PathStep* activePath    = nullptr;
-int            pathLength     = 0;
-int            pathStepIdx    = 0;
-unsigned long  pathStepStart  = 0;
+int             pathLength    = 0;
+int             pathStepIdx   = 0;
+unsigned long   pathStepStart = 0;
 
 
 // ============================================================
 //  HTML INTERFACE
+//
+//  HOLD-TO-DRIVE CONTROL SCHEME
+//  ─────────────────────────────────────────────────────────
+//  Direction buttons (FWD / REV / SPIN L / SPIN R) send their
+//  action command on press and automatically send 'stop' on
+//  release.  This means the rover only moves while the button
+//  is physically held, giving precise control through tight
+//  spaces.
+//
+//  Both mouse events (desktop) and touch events (mobile) are
+//  handled.  touchstart/touchend are used instead of relying
+//  on the browser's mouse emulation to prevent the 300 ms
+//  tap delay and avoid duplicate event firing on mobile.
+//
+//  The STOP button retains normal click behaviour – it is a
+//  safety cut that should always work with a quick tap.
+//
+//  Autonomous route buttons are unaffected – they use their
+//  own sendRoute() function with no hold logic.
 // ============================================================
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -247,6 +263,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       min-height: 100vh;
       padding: 24px 16px;
       gap: 28px;
+      /* Prevent text selection during button holds */
+      user-select: none;
+      -webkit-user-select: none;
     }
     header { text-align: center; }
     header h1 { font-size: 2rem; letter-spacing: 3px; color: #e05a1b; text-transform: uppercase; }
@@ -262,9 +281,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       border: 1px solid #333;
       transition: background 0.3s, color 0.3s;
     }
-    #status.ok   { background: #0f2d1a; color: #4caf50; border-color: #4caf50; }
-    #status.err  { background: #2d0f0f; color: #f44336; border-color: #f44336; }
-    #status.auto { background: #0a1f2d; color: #44aaff; border-color: #44aaff; }
+    #status.ok      { background: #0f2d1a; color: #4caf50; border-color: #4caf50; }
+    #status.err     { background: #2d0f0f; color: #f44336; border-color: #f44336; }
+    #status.driving { background: #0e2040; color: #5599ff; border-color: #5599ff; }
+    #status.auto    { background: #0a1f2d; color: #44aaff; border-color: #44aaff; }
 
     .dpad {
       display: grid;
@@ -280,30 +300,37 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       letter-spacing: 1px;
       text-transform: uppercase;
       cursor: pointer;
-      transition: filter 0.15s, transform 0.1s;
-      user-select: none;
+      /* Slightly slower release than press so held state feels solid */
+      transition: filter 0.05s, transform 0.05s;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       gap: 6px;
       color: #fff;
+      /* Suppress iOS callout and highlight on long press */
       -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
     }
     .btn .icon { font-size: 2rem; line-height: 1; }
-    .btn:active { transform: scale(0.93); filter: brightness(0.8); }
 
-    .btn-dir  { background: linear-gradient(145deg, #1e3a5f, #0e2040); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
-    .btn-spin-l  { background: linear-gradient(145deg, #1e3a5f, #0e2040); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
-    .btn-spin-r  { background: linear-gradient(145deg, #1e3a5f, #0e2040); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
-    .btn-stop { background: linear-gradient(145deg, #7a1a1a, #4a0f0f); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    /* Held visual state – applied by JS, not :active, so it
+       persists for the full duration of the hold */
+    .btn.held {
+      transform: scale(0.93);
+      filter: brightness(0.75);
+    }
 
-    .btn-fwd  { grid-column: 2; grid-row: 1; }
-	.btn-stop { grid-column: 2; grid-row: 2; }
-	.btn-bwd  { grid-column: 2; grid-row: 3; }
+    .btn-dir    { background: linear-gradient(145deg, #1e3a5f, #0e2040); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .btn-spin-l { background: linear-gradient(145deg, #1e3a5f, #0e2040); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .btn-spin-r { background: linear-gradient(145deg, #1e3a5f, #0e2040); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .btn-stop   { background: linear-gradient(145deg, #7a1a1a, #4a0f0f); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
 
-	.btn-spin-l { grid-column: 1; grid-row: 2; }
-	.btn-spin-r { grid-column: 3; grid-row: 2; }
+    .btn-fwd    { grid-column: 2; grid-row: 1; }
+    .btn-stop   { grid-column: 2; grid-row: 2; }
+    .btn-bwd    { grid-column: 2; grid-row: 3; }
+    .btn-spin-l { grid-column: 1; grid-row: 2; }
+    .btn-spin-r { grid-column: 3; grid-row: 2; }
 
     .speed-section {
       width: 100%;
@@ -323,23 +350,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     .speed-section label span { color: #e05a1b; font-weight: 700; font-size: 1rem; }
     .speed-section .sublabel  { font-size: 0.75rem; color: #555; margin-top: 8px; text-align: right; }
     input[type=range] { width: 100%; accent-color: #e05a1b; height: 6px; cursor: pointer; }
-
-    .extras {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      justify-content: center;
-      max-width: 360px;
-      width: 100%;
-    }
-    .btn-extra {
-      flex: 1 1 150px;
-      height: 64px;
-      border-radius: 12px;
-      background: linear-gradient(145deg, #2a1e3f, #180f28);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-      font-size: 0.85rem;
-    }
 
     /* ── Auto route panel ──────────────────────────────────── */
     .section-label {
@@ -372,12 +382,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       text-transform: uppercase;
       cursor: pointer;
       transition: filter 0.15s, transform 0.1s;
-      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
       color: #44aaff;
       background: linear-gradient(145deg, #0a1e3f, #060f28);
       border: 1px solid #0a3a6a;
       box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-      -webkit-tap-highlight-color: transparent;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -394,11 +404,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       letter-spacing: 1px;
       text-transform: uppercase;
       cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
       color: #fff;
       background: linear-gradient(145deg, #5a2a00, #3a1800);
       border: 1px solid #8a4400;
       box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-      -webkit-tap-highlight-color: transparent;
     }
     .btn-abort:active { transform: scale(0.97); filter: brightness(0.8); }
   </style>
@@ -413,27 +423,39 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div id="status">READY</div>
 
   <!-- ── D-PAD ─────────────────────────────────────────────── -->
+  <!--  Direction buttons use holdStart / holdEnd.             -->
+  <!--  STOP uses a plain onclick – it's a safety cut.         -->
   <div class="dpad">
-  <button class="btn btn-dir btn-fwd" onclick="send('forward')">
-    <span class="icon">&#9650;</span> FWD
-  </button>
 
-  <button class="btn btn-spin-l" onclick="send('spin_left')">
-    <span class="icon">&#8634;</span> SPIN L
-  </button>
+    <button class="btn btn-dir btn-fwd"
+            onmousedown="holdStart(event,'forward')"   onmouseup="holdEnd(event)"   onmouseleave="holdEnd(event)"
+            ontouchstart="holdStart(event,'forward')"  ontouchend="holdEnd(event)"  ontouchcancel="holdEnd(event)">
+      <span class="icon">&#9650;</span> FWD
+    </button>
 
-  <button class="btn btn-stop" onclick="send('stop')">
-    <span class="icon">&#9632;</span> STOP
-  </button>
+    <button class="btn btn-spin-l"
+            onmousedown="holdStart(event,'spin_left')"  onmouseup="holdEnd(event)"  onmouseleave="holdEnd(event)"
+            ontouchstart="holdStart(event,'spin_left')" ontouchend="holdEnd(event)" ontouchcancel="holdEnd(event)">
+      <span class="icon">&#8634;</span> SPIN L
+    </button>
 
-  <button class="btn btn-spin-r" onclick="send('spin_right')">
-    <span class="icon">&#8635;</span> SPIN R
-  </button>
+    <button class="btn btn-stop" onclick="send('stop')">
+      <span class="icon">&#9632;</span> STOP
+    </button>
 
-  <button class="btn btn-dir btn-bwd" onclick="send('backward')">
-    <span class="icon">&#9660;</span> REV
-  </button>
-</div>
+    <button class="btn btn-spin-r"
+            onmousedown="holdStart(event,'spin_right')"  onmouseup="holdEnd(event)"  onmouseleave="holdEnd(event)"
+            ontouchstart="holdStart(event,'spin_right')" ontouchend="holdEnd(event)" ontouchcancel="holdEnd(event)">
+      <span class="icon">&#8635;</span> SPIN R
+    </button>
+
+    <button class="btn btn-dir btn-bwd"
+            onmousedown="holdStart(event,'backward')"   onmouseup="holdEnd(event)"   onmouseleave="holdEnd(event)"
+            ontouchstart="holdStart(event,'backward')"  ontouchend="holdEnd(event)"  ontouchcancel="holdEnd(event)">
+      <span class="icon">&#9660;</span> REV
+    </button>
+
+  </div>
 
   <!-- ── THROTTLE SLIDER ───────────────────────────────────── -->
   <div class="speed-section">
@@ -468,7 +490,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </button>
     -->
 
-    <!-- ABORT button – always visible, stops any running route -->
     <button class="btn-abort" onclick="send('stop')">
       &#9632; ABORT ROUTE
     </button>
@@ -476,35 +497,88 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   </div>
 
   <script>
-    // Manual drive command
+    // ── Hold-to-drive logic ───────────────────────────────────
+    //
+    // holdStart  fires on mousedown / touchstart.
+    //            Sends the drive action and marks the button as held.
+    //
+    // holdEnd    fires on mouseup / touchend / touchcancel /
+    //            mouseleave (finger/cursor left the button).
+    //            Sends 'stop' and clears the held state.
+    //
+    // activeBtn  tracks which button is currently held so
+    //            stray mouseup/touchend events on other elements
+    //            don't send spurious stops.
+
+    let activeBtn = null;
+
+    function holdStart(e, action) {
+      // Prevent touch events from also firing as mouse events,
+      // which would double-send the command on mobile.
+      e.preventDefault();
+
+      // If something else is held (e.g. two-finger press), ignore
+      if (activeBtn && activeBtn !== e.currentTarget) return;
+
+      activeBtn = e.currentTarget;
+      activeBtn.classList.add('held');
+
+      setStatus(action, 'driving');
+      cmdSend(action);
+    }
+
+    function holdEnd(e) {
+      e.preventDefault();
+      if (!activeBtn) return;
+
+      activeBtn.classList.remove('held');
+      activeBtn = null;
+
+      setStatus('STOPPING', '');
+      cmdSend('stop');
+    }
+
+    // ── Status helpers ────────────────────────────────────────
+    function setStatus(text, cls) {
+      const s = document.getElementById('status');
+      s.className = cls;
+      s.textContent = text.toUpperCase();
+    }
+
+    // ── Fire-and-forget fetch – no response handling needed
+    //    for hold commands since the rover acts immediately.
+    //    Errors surface as 'NO RESPONSE' only.
+    function cmdSend(action) {
+      fetch('/cmd?action=' + action)
+        .catch(() => {
+          setStatus('NO RESPONSE', 'err');
+          // Safety: clear active button state on comms failure
+          if (activeBtn) { activeBtn.classList.remove('held'); activeBtn = null; }
+        });
+    }
+
+    // ── Standard send – used for STOP button and slider
     function send(action) {
-      const status = document.getElementById('status');
-      status.className = '';
-      status.textContent = action.toUpperCase() + '...';
+      setStatus(action, '');
       fetch('/cmd?action=' + action)
         .then(r => r.text())
         .then(t => {
-          status.className = 'ok';
-          status.textContent = t;
-          setTimeout(() => { status.className = ''; status.textContent = 'READY'; }, 2000);
+          setStatus(t, 'ok');
+          setTimeout(() => setStatus('READY', ''), 2000);
         })
-        .catch(() => { status.className = 'err'; status.textContent = 'NO RESPONSE'; });
+        .catch(() => setStatus('NO RESPONSE', 'err'));
     }
 
-    // Autonomous route command – blue status persists until route ends or is aborted
+    // ── Autonomous route command ──────────────────────────────
     function sendRoute(action) {
-      const status = document.getElementById('status');
-      status.className = 'auto';
-      status.textContent = '\u25b6\u25b6 RUNNING...';
+      setStatus('\u25b6\u25b6 RUNNING...', 'auto');
       fetch('/cmd?action=' + action)
         .then(r => r.text())
-        .then(t => {
-          status.className = 'auto';
-          status.textContent = '\u25b6\u25b6 ' + t;
-        })
-        .catch(() => { status.className = 'err'; status.textContent = 'NO RESPONSE'; });
+        .then(t => setStatus('\u25b6\u25b6 ' + t, 'auto'))
+        .catch(() => setStatus('NO RESPONSE', 'err'));
     }
 
+    // ── Speed slider ──────────────────────────────────────────
     let speedTimer;
     function updateSpeed(val) {
       document.getElementById('speedVal').textContent = val;
@@ -515,6 +589,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 </body>
 </html>
 )rawliteral";
+
 
 // ============================================================
 //  LOW-LEVEL ESC PRIMITIVES
@@ -537,28 +612,13 @@ void hardStop() {
   roverState    = IDLE;
 }
 
+
 // ============================================================
 //  PATH RUNNER  –  non-blocking autonomous execution
-//
-//  startPath()  loads a route and fires the first step.
-//  stopPath()   aborts immediately and hard-stops the rover.
-//  updatePath() is called every loop() tick. It checks whether
-//               the current step's duration has elapsed and if
-//               so, executes the next step.
-//
-//  Steps with ACT_STOP insert a guaranteed motors-at-neutral
-//  pause between moves, giving the ramp engine time to fully
-//  settle before the next command fires.  Always add a short
-//  ACT_STOP between direction changes in your routes.
-//
-//  Manual drive commands call stopPath() before executing,
-//  so the driver always has full override authority.
 // ============================================================
 
-// Apply a single path step to the motors immediately.
-// speedOffset of 0 means inherit the current driveOffset.
 void applyPathStep(const PathStep& step) {
-  int spd = (step.speedOffset > 0) ? step.speedOffset : driveOffset;
+  int spd = driveOffset;
 
   switch (step.action) {
     case ACT_FORWARD:
@@ -566,7 +626,6 @@ void applyPathStep(const PathStep& step) {
       currentDir    = DIR_FORWARD;
       pendingDir    = DIR_NONE;
       currentMicros = ESC_NEUTRAL + DEADBAND;
-      // Store step speed so ramp engine targets it
       driveOffset   = spd;
       applyBothESCs(currentMicros);
       roverState    = RAMPING_UP;
@@ -586,16 +645,16 @@ void applyPathStep(const PathStep& step) {
       isSpinning = true;
       roverState = RUNNING;
       currentDir = DIR_NONE;
-      esc1.writeMicroseconds(ESC_NEUTRAL - spd);   // left  → reverse
-      esc2.writeMicroseconds(ESC_NEUTRAL + spd);   // right → forward
+      esc1.writeMicroseconds(ESC_NEUTRAL - DEADBAND);
+      esc2.writeMicroseconds(ESC_NEUTRAL + DEADBAND);
       break;
 
     case ACT_SPIN_RIGHT:
       isSpinning = true;
       roverState = RUNNING;
       currentDir = DIR_NONE;
-      esc1.writeMicroseconds(ESC_NEUTRAL + spd);   // left  → forward
-      esc2.writeMicroseconds(ESC_NEUTRAL - spd);   // right → reverse
+      esc1.writeMicroseconds(ESC_NEUTRAL + DEADBAND);
+      esc2.writeMicroseconds(ESC_NEUTRAL - DEADBAND);
       break;
 
     case ACT_STOP:
@@ -607,10 +666,10 @@ void applyPathStep(const PathStep& step) {
 }
 
 void startPath(const PathStep* path, int length) {
-  activePath   = path;
-  pathLength   = length;
-  pathStepIdx  = 0;
-  pathRunning  = true;
+  activePath    = path;
+  pathLength    = length;
+  pathStepIdx   = 0;
+  pathRunning   = true;
   pathStepStart = millis();
   applyPathStep(activePath[0]);
 }
@@ -621,18 +680,16 @@ void stopPath() {
   hardStop();
 }
 
-// Advance the path one step at a time using millis() – never blocks.
 void updatePath() {
   if (!pathRunning) return;
 
-  unsigned long now = millis();
+  unsigned long now     = millis();
   unsigned long elapsed = now - pathStepStart;
 
   if (elapsed >= (unsigned long)activePath[pathStepIdx].duration) {
     pathStepIdx++;
 
     if (pathStepIdx >= pathLength) {
-      // Route complete
       stopPath();
       Serial.println("Route complete.");
       return;
@@ -640,10 +697,10 @@ void updatePath() {
 
     pathStepStart = now;
     applyPathStep(activePath[pathStepIdx]);
-
     Serial.printf("Path step %d / %d\n", pathStepIdx + 1, pathLength);
   }
 }
+
 
 // ============================================================
 //  RAMP ENGINE  –  non-blocking, called every loop()
@@ -683,8 +740,8 @@ void updateRamp() {
           currentDir    = pendingDir;
           pendingDir    = DIR_NONE;
           currentMicros = (currentDir == DIR_FORWARD)
-                          ? ESC_NEUTRAL + DEADBAND
-                          : ESC_NEUTRAL - DEADBAND;
+            ? ESC_NEUTRAL + DEADBAND
+            : ESC_NEUTRAL - DEADBAND;
           applyBothESCs(currentMicros);
           roverState = RAMPING_UP;
         } else {
@@ -713,10 +770,9 @@ void updateRamp() {
   }
 }
 
+
 // ============================================================
 //  MANUAL COMMAND HANDLERS
-//  All of these call stopPath() first so manual control
-//  always immediately overrides any running route.
 // ============================================================
 
 void cmdMove(Direction dir) {
@@ -795,25 +851,23 @@ void handleCmd() {
   String response = "OK";
 
   // ── Manual drive ──────────────────────────────────────────
-  if      (action == "forward")    { cmdMove(DIR_FORWARD);  response = "FORWARD";  }
-  else if (action == "backward")   { cmdMove(DIR_BACKWARD); response = "REVERSE";  }
-  else if (action == "stop")       { cmdStop();              response = "STOPPED";  }
-  else if (action == "spin_left")  { cmdSpinLeft();          response = "SPIN L";   }
-  else if (action == "spin_right") { cmdSpinRight();         response = "SPIN R";   }
+  if      (action == "forward")    { cmdMove(DIR_FORWARD);  response = "FORWARD"; }
+  else if (action == "backward")   { cmdMove(DIR_BACKWARD); response = "REVERSE"; }
+  else if (action == "stop")       { cmdStop();              response = "STOPPED"; }
+  else if (action == "spin_left")  { cmdSpinLeft();          response = "SPIN L";  }
+  else if (action == "spin_right") { cmdSpinRight();         response = "SPIN R";  }
 
   // ── ROUTE COMMANDS ────────────────────────────────────────
-  //  To add a route: copy one of these else-if lines,
-  //  change the action string and the startPath() arguments.
   else if (action == "route_square")  {
-    startPath(ROUTE_SQUARE,   PATH_LEN_SQUARE);
+    startPath(ROUTE_SQUARE,  PATH_LEN_SQUARE);
     response = "SQUARE ROUTE";
   }
   else if (action == "route_figure8") {
-    startPath(ROUTE_FIGURE8,  PATH_LEN_FIGURE8);
+    startPath(ROUTE_FIGURE8, PATH_LEN_FIGURE8);
     response = "FIGURE-8 ROUTE";
   }
   else if (action == "route_patrol")  {
-    startPath(ROUTE_PATROL,   PATH_LEN_PATROL);
+    startPath(ROUTE_PATROL,  PATH_LEN_PATROL);
     response = "PATROL ROUTE";
   }
   // Template:
@@ -845,6 +899,7 @@ void handleNotFound() {
   server.send(404, "text/plain", "NOT FOUND");
 }
 
+
 // ============================================================
 //  SETUP
 // ============================================================
@@ -852,7 +907,6 @@ void handleNotFound() {
 void setup() {
   Serial.begin(115200);
 
-  // Timers 2 & 3 – 0 & 1 are reserved by the WiFi stack
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
@@ -860,7 +914,7 @@ void setup() {
   esc2.attach(ESC2_PIN, ESC_MIN, ESC_MAX);
 
   hardStop();
-  delay(2000);   // hold neutral so ESCs arm cleanly
+  delay(2000);
 
   Serial.println("\nESCs armed.");
   Serial.println("Starting WiFi Access Point...");
@@ -880,12 +934,13 @@ void setup() {
   Serial.println("Web server started.");
 }
 
+
 // ============================================================
-//  LOOP  –  three non-blocking tasks share this thread
+//  LOOP
 // ============================================================
 
 void loop() {
-  server.handleClient();   // service web requests
-  updateRamp();            // advance drive speed ramp
-  updatePath();            // advance autonomous route
+  server.handleClient();
+  updateRamp();
+  updatePath();
 }
