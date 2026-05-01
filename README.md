@@ -9,5 +9,6 @@ Photos of our process and of the final product
 
 This project was a great expreince, offering lessons in teamwork, CAD design, and technical communication.
 
-SEC001 Rover Team,
+SEC001 Rover Team:
+
 Ben Kirschner, Giselle Gutierrez, Adam DeVries, Ryan Costanza 
