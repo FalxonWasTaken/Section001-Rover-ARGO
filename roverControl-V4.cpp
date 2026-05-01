@@ -1,55 +1,39 @@
-// ============================================================
-//  Mars Rover - ESP32 WiFi Control
-//  BLHeli_32 ESC edition  |  Non-blocking ramp  |  Auto-paths
-//
-//  1. Power on the ESP32
-//  2. Connect to WiFi:  MarsRover
-//  3. Open browser:     192.168.4.1
-//
-//  ESC signal scheme:
+//  ESC signal notes (from other projectss):
 //    1000 µs = full reverse
-//    1500 µs = neutral / stop
+//    1500 µs = neutral
 //    2000 µs = full forward
-// ============================================================
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESP32Servo.h>
 
-// ============================================================
-//  WIFI CONFIGURATION
-// ============================================================
+// WIFI config
+
 const char* AP_SSID     = "MarsRover";
 const char* AP_PASSWORD = "rover1234";
 
-// ============================================================
-//  ESC PIN CONFIGURATION
-// ============================================================
+//  ESC pin config
+
 const int ESC1_PIN = 33;   // Left motor
 const int ESC2_PIN = 32;   // Right motor
 
-// ============================================================
-//  ESC SIGNAL RANGE (µs)
-// ============================================================
+//  ESC sig range
+
 const int ESC_MIN     = 1000;
 const int ESC_NEUTRAL = 1500;
 const int ESC_MAX     = 2000;
 
-// ============================================================
-//  THROTTLE SETTINGS
-// ============================================================
+//  throttle settings
+
 const int DEADBAND  = 80;
 int driveOffset = 350;
 
-// ============================================================
-//  RAMP CONFIGURATION
-// ============================================================
+//  ramp config
+
 const int RAMP_STEP     = 10;
 const int RAMP_INTERVAL = 25;
 
-// ============================================================
-//  DRIVE STATE MACHINE
-// ============================================================
+//  drive state
 enum RoverState { IDLE, RAMPING_UP, RUNNING, RAMPING_DOWN };
 enum Direction  { DIR_NONE, DIR_FORWARD, DIR_BACKWARD };
 
@@ -62,62 +46,6 @@ unsigned long lastRampMillis = 0;
 
 Servo     esc1, esc2;
 WebServer server(80);
-
-
-// ============================================================
-//  ████████████████████████████████████████████████████████
-//  ██                                                    ██
-//  ██              AUTONOMOUS ROUTE BOOK                 ██
-//  ██                                                    ██
-//  ██  This is the only section you need to edit to      ██
-//  ██  add, remove, or tune autonomous paths.            ██
-//  ██                                                    ██
-//  ████████████████████████████████████████████████████████
-//
-//  HOW TO DEFINE A PATH
-//  ─────────────────────────────────────────────────────────
-//  Each path is an array of PathStep entries:
-//
-//    { ACTION, DURATION_MS, SPEED_OFFSET }
-//
-//  ACTION        What the rover does for this step:
-//    ACT_FORWARD     Drive forward
-//    ACT_BACKWARD    Drive backward
-//    ACT_SPIN_LEFT   Pivot left  (both wheels opposing)
-//    ACT_SPIN_RIGHT  Pivot right (both wheels opposing)
-//    ACT_STOP        Hold still  (motors at neutral)
-//
-//  DURATION_MS   How long to hold this action in milliseconds
-//                1000 = 1 second
-//
-//  SPEED_OFFSET  ESC µs offset from neutral for this step.
-//                Same as the web slider:  100 (slow) – 500 (fast)
-//                Overrides driveOffset just for this step.
-//                Use 0 to inherit the current slider value.
-//
-//  EXAMPLE STEP:
-//    { ACT_FORWARD, 2000, 300 }   // Forward for 2 s at offset 300
-//    { ACT_SPIN_LEFT, 600, 400 }  // Spin left for 0.6 s at offset 400
-//    { ACT_STOP, 500, 0 }         // Pause for 0.5 s
-//
-//  HOW TO ADD A NEW PATH
-//  ─────────────────────────────────────────────────────────
-//  1. Copy one of the route arrays below and rename it
-//  2. Edit its steps
-//  3. Add a matching PATH_LEN_* constant
-//  4. Add a button in the route panel (search for
-//     "ROUTE BUTTONS" in the HTML below)
-//  5. Add one else-if line in handleCmd() (search for
-//     "ROUTE COMMANDS" near the bottom of this file)
-//
-//  TUNING TIPS
-//  ─────────────────────────────────────────────────────────
-//  - Spin duration controls turning angle.  On a hard floor
-//    ~500 ms ≈ 90°, ~1000 ms ≈ 180°.  Calibrate on your surface.
-//  - Add ACT_STOP steps between moves for cleaner transitions.
-//  - The ramp engine still runs during paths, so forward/backward
-//    steps will always accelerate smoothly – no jerky starts.
-// ============================================================
 
 enum PathAction {
   ACT_FORWARD,
@@ -133,7 +61,7 @@ struct PathStep {
   uint16_t   speedOffset;   // µs offset, 0 = use current driveOffset
 };
 
-// ── Route 1: Square ──────────────────────────────────────────
+// Route 1 square
 const PathStep ROUTE_SQUARE[] = {
   { ACT_FORWARD,    2000, 300 },
   { ACT_STOP,        300,   0 },
@@ -154,7 +82,7 @@ const PathStep ROUTE_SQUARE[] = {
 };
 const int PATH_LEN_SQUARE = sizeof(ROUTE_SQUARE) / sizeof(ROUTE_SQUARE[0]);
 
-// ── Route 2: Figure-8 ────────────────────────────────────────
+// Route 2 figure8
 const PathStep ROUTE_FIGURE8[] = {
   { ACT_FORWARD,   1500, 300 },
   { ACT_STOP,       300,   0 },
@@ -191,7 +119,7 @@ const PathStep ROUTE_FIGURE8[] = {
 };
 const int PATH_LEN_FIGURE8 = sizeof(ROUTE_FIGURE8) / sizeof(ROUTE_FIGURE8[0]);
 
-// ── Route 3: Patrol ───────────────────────────────────────────
+// Route 3: patrol
 const PathStep ROUTE_PATROL[] = {
   { ACT_FORWARD,  3000, 280 },
   { ACT_STOP,      500,   0 },
@@ -204,8 +132,7 @@ const PathStep ROUTE_PATROL[] = {
 };
 const int PATH_LEN_PATROL = sizeof(ROUTE_PATROL) / sizeof(ROUTE_PATROL[0]);
 
-// ── ADD YOUR OWN ROUTES BELOW THIS LINE ──────────────────────
-//
+// route template below
 // const PathStep ROUTE_MYPATH[] = {
 //   { ACT_FORWARD,    2000, 300 },
 //   { ACT_STOP,        400,   0 },
@@ -214,7 +141,7 @@ const int PATH_LEN_PATROL = sizeof(ROUTE_PATROL) / sizeof(ROUTE_PATROL[0]);
 // };
 // const int PATH_LEN_MYPATH = sizeof(ROUTE_MYPATH) / sizeof(ROUTE_MYPATH[0]);
 
-// ── Path runner state ─────────────────────────────────────────
+// path runner state
 bool            pathRunning   = false;
 const PathStep* activePath    = nullptr;
 int             pathLength    = 0;
@@ -223,7 +150,7 @@ unsigned long   pathStepStart = 0;
 
 
 // ============================================================
-//  HTML INTERFACE
+//  html interface from other projects, copied descrption below
 //
 //  HOLD-TO-DRIVE CONTROL SCHEME
 //  ─────────────────────────────────────────────────────────
@@ -241,9 +168,8 @@ unsigned long   pathStepStart = 0;
 //  The STOP button retains normal click behaviour – it is a
 //  safety cut that should always work with a quick tap.
 //
-//  Autonomous route buttons are unaffected – they use their
-//  own sendRoute() function with no hold logic.
 // ============================================================
+
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -591,9 +517,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 
-// ============================================================
-//  LOW-LEVEL ESC PRIMITIVES
-// ============================================================
+//  esc primatives
 
 void applyBothESCs(int micros) {
   micros = constrain(micros, ESC_MIN, ESC_MAX);
@@ -613,9 +537,7 @@ void hardStop() {
 }
 
 
-// ============================================================
-//  PATH RUNNER  –  non-blocking autonomous execution
-// ============================================================
+//  path runner bit
 
 void applyPathStep(const PathStep& step) {
   int spd = driveOffset;
@@ -702,9 +624,7 @@ void updatePath() {
 }
 
 
-// ============================================================
-//  RAMP ENGINE  –  non-blocking, called every loop()
-// ============================================================
+//  ramper go weeeee
 
 void updateRamp() {
   if (isSpinning) return;
@@ -771,9 +691,7 @@ void updateRamp() {
 }
 
 
-// ============================================================
-//  MANUAL COMMAND HANDLERS
-// ============================================================
+//  manual command handler thing
 
 void cmdMove(Direction dir) {
   if (pathRunning) stopPath();
@@ -833,9 +751,7 @@ void cmdSpinRight() {
   esc2.writeMicroseconds(ESC_NEUTRAL - driveOffset);
 }
 
-// ============================================================
-//  WEB HANDLERS
-// ============================================================
+//  web handler (spiderman code go brrr)
 
 void handleRoot() {
   server.send_P(200, "text/html", INDEX_HTML);
@@ -850,14 +766,14 @@ void handleCmd() {
   String action   = server.arg("action");
   String response = "OK";
 
-  // ── Manual drive ──────────────────────────────────────────
+  // manual drive 
   if      (action == "forward")    { cmdMove(DIR_FORWARD);  response = "FORWARD"; }
   else if (action == "backward")   { cmdMove(DIR_BACKWARD); response = "REVERSE"; }
   else if (action == "stop")       { cmdStop();              response = "STOPPED"; }
   else if (action == "spin_left")  { cmdSpinLeft();          response = "SPIN L";  }
   else if (action == "spin_right") { cmdSpinRight();         response = "SPIN R";  }
 
-  // ── ROUTE COMMANDS ────────────────────────────────────────
+  // rout commands
   else if (action == "route_square")  {
     startPath(ROUTE_SQUARE,  PATH_LEN_SQUARE);
     response = "SQUARE ROUTE";
@@ -876,7 +792,7 @@ void handleCmd() {
   //   response = "MY PATH";
   // }
 
-  // ── Throttle slider ───────────────────────────────────────
+  // throttle sliderr
   else if (action.startsWith("speed_")) {
     int val    = action.substring(6).toInt();
     val        = constrain(val, DEADBAND, 500);
@@ -899,10 +815,6 @@ void handleNotFound() {
   server.send(404, "text/plain", "NOT FOUND");
 }
 
-
-// ============================================================
-//  SETUP
-// ============================================================
 
 void setup() {
   Serial.begin(115200);
@@ -934,10 +846,7 @@ void setup() {
   Serial.println("Web server started.");
 }
 
-
-// ============================================================
-//  LOOP
-// ============================================================
+//  infinite loop (2648 referwence (niche few will get :sadge: (kevin will get it if he eversees this))))
 
 void loop() {
   server.handleClient();
