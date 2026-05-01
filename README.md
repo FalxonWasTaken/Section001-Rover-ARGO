@@ -7,12 +7,7 @@ Complete CAD tracking across several iterations of the robot design
 Our technical design notebook detailing reasons behind our decisions
 Photos of our process and of the final product
 
-/put in description of project/requirements or guidence we were given at the beggining/
+This project was a great expreince, offering lessons in teamwork, CAD design, and technical communication.
 
-Deliverables:
-
-/outline deliverables/
-
-Goals:
-
-/outline goals (include competition aspect)/
+SEC001 Rover Team,
+Ben Kirschner, Giselle Gutierrez, Adam DeVries, Ryan Costanza 
